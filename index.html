@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>ECE 4760 Final Project: 3D Orientation Mouse</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+    <script>
+    MathJax = {
+      tex: {
+        inlineMath: [['$', '$'], ['\\(', '\\)']]
+      }
+    };
+    </script>
+    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+</head>
+<body>
+
+<nav>
+    <h3>Project Menu</h3>
+    <a href="#intro">Introduction</a>
+    <a href="#design">High-Level Design</a>
+    <a href="#hardware">Program & Hardware</a>
+    <a href="#results">Results</a>
+    <a href="#conclusions">Conclusions</a>
+    <a href="#appendices">Appendices</a>
+</nav>
+
+<main>
+    <h1>3D Orientation Mouse</h1>
+    <p><em>Adin Moskowitz (am2736) and Siang Peng (sp2222)</em></p>
+
+    <section id="intro">
+        <h2>Project Introduction</h2>
+        <p>We created a handheld 3D orientation mouse that uses IMU motion and orientation quaternions for two practical computer interfaces: a “laser pointer mouse” where pointing the device controls the on-screen cursor, and a “3D mouse” for SolidWorks, where rotating the device live-rotates a CAD model view.</p>
+        <iframe width="560" height="315" src="https://www.youtube.com/embed/YOUR_VIDEO_ID" frameborder="0" allowfullscreen></iframe>
+        <p>We used an MPU6050 6-axis IMU (3-axis accelerometer + 3-axis gyroscope) connected to an RP2040 microcontroller to record 3D orientation of our device. On the RP2040, we estimate the device’s full 3D orientation using a quaternion-based pipeline (gyro integration with accelerometer-based tilt correction). This quaternion orientation is then used for two functions:</p>
+        <ul>
+            <li><strong>Pointer Mode:</strong> We compute the device’s pointing direction from the quaternion and map that direction to cursor motion, similarly to products like TV “air remotes.”</li>
+            <li><strong>CAD Mode:</strong> We stream orientation data over serial to a PC program, which converts our device’s orientation into SolidWorks or AutoCAD view rotations, allowing for continuous 3D view manipulation.</li>
+        <p>To make the device easily usable, we designed and fabricated a 3D-printed enclosure with dedicated mounting for the RP2040 and IMU. The device includes three debounced buttons for user input: one for mouse left-click, one for manual drift correction, and one for entering the RP2040’s BOOTSEL mode for easy reprogramming.
+        </p>
+        </section>
+
+    <section id="high-level-design">
+    <h2>High Level Design</h2>
+    
+    <h3>Motivation For Project</h3>
+    <p>Our motivation for this project was to build a handheld device that fully utilizes the IMU capabilities of the MPU6050, explores the use of quaternions to track 3D rotations, and expands the basic functions of USB mouse control. Inspired by consumer devices such as the LG Magic Remote and the Wii remote, which let users control an on-screen cursor by pointing and rotating a handheld controller. We wanted to recreate a similar user experience for a computer by creating a 3D mouse that maps its pointing direction to an (x,y) cursor position on the screen, enabling remote mouse control for tasks like navigating a desktop, using their computer like a TV, or for better interaction with slides during presentations. 
+</p>
+    <p>We were also inspired by 3D CAD devices such as the SpaceMouse, which make it much easier to manipulate a model’s view. However, traditional CAD controllers are designed for use on a desk. We wanted to combine concept of the SpaceMouse with our 3D controller, allowing a user to rotate the device in their hand (in the air) to live rotate the CAD view directly.</p>
+
+    <div class="math-section">
+        <h3>Relavent Math</h3>
+        <h4>Quaternions vs. Euler Angles</h4>
+        <p>
+            While Euler angles (Roll, Pitch, and Yaw) are the most intuitive way to visualize rotation, they have a few limitations which make them unsuitable for 3D orientation and rotation tracking:
+        </p>
+        <ul>
+            <li><strong>Gimbal Lock:</strong>Euler angles have a mathematical singularity (at 0 or 90 degrees) where two of the three axes align, causing the system to "lock," losing a degree of freedom and making it impossible to track rotations around the third axis independently.</li>
+            
+            <li><strong>Multiple Interpolations:</strong> The other issue with Euler angles is that there are multiple (up to 12) possible orders for applying Euler rotations to get to the same final orientation, leading to computational issues with tracking. This also causes issues with smoothly transitioning between two orientations, leading to jerky or unnatural movements.</li>
+        </ul>
+        <p>Here is a funny example of an interpolation issue in graphics caused by using Euler angles:</p>
+        
+        <div class="video-container">
+            <video width="320" height="180" controls>
+                <source src="m2-res_240p.mp4" type="video/mp4">
+                Your browser does not support the video tag.
+            </video>
+            <figcaption>https://www.reddit.com/r/EASportsFC/comments/9gms3n/most_realistic_graphics_ever_in_fifa_history/</figcaption>
+        </div>
+        <p>
+            Because of these issues, we represent orientation using a <strong>unit quaternion</strong>, a 4-dimensional mathematical object $q=(w,x,y,z)$ where w is the real component and (x, y, z) are the imaginary components. For our calculations we use unit quaternions which are normalized, meaning $\sqrt{w^{2}+x^{2}+y^{2}+z^{2}}=1$.</p>
+            <p> This mathematical representation avoids the Euler angle issues of gimbal lock and rotational interpolation. Additionally, quaternions allow for Spherical Linear Interpolation (Slerp), which creates smooth, constant transitions between two orientations, making them a smoother representation of rotational motion.
+        </p>
+
+        <h4>Axis-Angle Representation</h4>
+        <p>
+            Quaternions use the idea that every rotation in space has an axis of rotation. We can use this idea to compute a rotation quaternion $q$. Any rotation can be represented by a single rotation, around a specific unit axis in space $(u=u_{x},u_{y},u_{z})$ given by the equation:
+            $$q=(cos\frac{\theta}{2},u_{x}sin\frac{\theta}{2},u_{y}sin\frac{\theta}{2},u_{z}sin\frac{\theta}{2})$$
+        </p>
+
+        <h4>Computing Rotations</h4>
+        <p>
+            We can represent 3D vectors with quaternions by setting the real part, $w$, to 0:</p>
+            <p class="center-text"> $q_{u}=0+u_{x}i+u_{y}j+u_{z}k$ </p>
+            <p> We can apply a 3D rotation to a vector in $u$ in quaternion form $q_{u}$ with the equation:</p>
+            <p class="center-text">${q^{\prime}}_{u}=qq_{u}q^{-1}$</p>
+            <p>where ${q^{\prime}}_{u}$ is the rotated vector, $q$ is the rotation quaternion defined above, and $q^{-1}$ is its inverse defined as:</p>
+            <p class="center-text"> $q^{-1}=(w,-x,-y,-z)$</p>
+        <h4>Quaternion Multiplication</h4>
+    <p>The rotation equation uses quaternion multiplication where the product of two quaternions \(q_1\) and \(q_2\) is defined as:</p>
+        \[
+        \begin{aligned}
+        q_1 q_2 = ( & w_1 w_2 - x_1 x_2 - y_1 y_2 - z_1 z_2, \\
+                    & w_1 x_2 + x_1 w_2 + y_1 z_2 - z_1 y_2, \\
+                    & w_1 y_2 - x_1 z_2 + y_1 w_2 + z_1 x_2, \\
+                    & w_1 z_2 + x_1 y_2 - y_1 x_2 + z_1 w_2 )
+        \end{aligned}
+        \]
+            <p> It is important to note that quaternion multiplication is non-commutative, meaning the order of multiplication matters.</p>
+            
+        <h4>Filtering</h4>
+            <p>In addition, we used complementary filtering to fuse gyroscope and accelerometer data:
+            $$q_{est} = \alpha \cdot q_{gyro} + (1 - \alpha) \cdot q_{accel\_correction}$$
+            We also used low-pass filtering to smooth cursor motion with the equation:
+            $$x_{smoothed} = s \cdot x_{previous} + (1 - s) \cdot x_{current}$$
+            where $s$ is the smoothing factor.
+        </p>
+    </div>
+
+    <section id="logical-structure">
+    <h3>Logical Structure</h3>
+    <p>The general structure of the code can be broken down as follows:</p>
+    
+    <div class="logical-layout">
+        <div class="logical-text">
+            <h4>1. Interrupt Service Routine</h4>
+            <p>We use a PWM wrap interrupt as a periodic timer to run the interrupt service routine code at around 1.2kHz. At each interrupt we read raw accelerometer and gyroscope data, store them in shared variables, and signal an IMU thread to update the attitude estimation.</p>
+
+            <h4>3. IMU Thread</h4>
+            <p>The IMU thread is signaled each time we read new IMU data. It primarily runs the imu_update() function to compute the new orientation quaternion from the accelerometer and gyroscope readings.</p>
+
+            <h4>4. Cursor and CAD Control</h4>
+            <p>The device can switch between two modes. The first is <strong>CAD Mode</strong>, where the device controls the orientation of a CAD model on the user's PC. The second is <strong>Pointer Mode</strong>, where the device controls the cursor location on the user's PC.</p>
+
+            <h4>4.1 Pointer Mode</h4>
+            <p>In Pointer Mode, we make the RP2040 act as a USB device to the user's PC. We map the orientation of our device to a delta x and y position on the PC screen and output that to the computer as a mouse signal. We also check if the user pressed the calibration or the mouse left click button and output the corresponding signal.</p>
+
+            <h4>4.2 CAD Mode</h4>
+            <p>In CAD Mode, the RP2040 acts as a serial device where we output the most recent orientation quaternion over serial to the PC. The PC then runs a Python program to manipulate the camera view of an open CAD model to match the orientation of our device.</p>
+        </div>
+
+        <div class="logical-diagram">
+            <img src="Code_Flowchart.png" alt="Logical Structure Diagram">
+        </div>
+    </div>
+</section>
+    
+
+    <h3>Hardware/software tradeoffs</h3>
+    <p>ADD</p>
+
+
+    <h3>Intellectual Property Concerns: Patents, Copyrights, and Trademarks</h3>
+    <p>ADD</p>
+</section>
+
+<section id="hardware-design">
+    <h2>Hardware Design</h2>
+    <p>ADD</p>
+</section>
+
+    <section id="results">
+        <h2>Results of the Design</h2>
+        <p>ADD</p>        
+    </section>
+
+    <section id="appendices">
+        <h2>Appendices</h2>
+        <h3>Appendix A: Permissions</h3>
+        <p class="warning">"The group approves this report for inclusion on the course website."</p>
+        <p class="warning">"The group approves the video for inclusion on the course youtube channel."</p>
+        
+        <h3>Appendix B: Source Code</h3>
+        <p>All code is provided in <code>quat_math.c</code> and <code>main.c</code></p>
+    </section>
+</main>
+
+</body>
+</html>
